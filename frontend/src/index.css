@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'Inter', sans-serif;
+  background: #0f1117;
+  color: #e2e8f0;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #1a1f2e; }
+::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+
+.table-wrapper { overflow-x: auto; overflow-y: auto; max-height: 65vh; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+thead th { position: sticky; top: 0; background: #1e2537; z-index: 10; padding: 10px 14px; text-align: left; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #2d3748; white-space: nowrap; }
+tbody tr { border-bottom: 1px solid #1e2537; }
+tbody tr:hover { background: #1a2035; }
+tbody td { padding: 8px 14px; color: #cbd5e1; vertical-align: top; max-width: 400px; word-break: break-word; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+tbody td.plain { font-family: 'Inter', sans-serif; font-size: 12px; }
+tbody td.decrypted { color: #86efac; }
+tbody td.failed { color: #fca5a5; font-style: italic; }
