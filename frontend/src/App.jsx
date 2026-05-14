@@ -115,7 +115,9 @@ function ResultsTable({ columns, rows, encryptedColumns }) {
 // ── Main App ───────────────────────────────────────────────────────────────
 export default function App() {
   const [securityKey, setSecurityKey] = useState('');
+  const [additionalKeys, setAdditionalKeys] = useState('');
   const [showKey, setShowKey] = useState(false);
+  const [showAdditional, setShowAdditional] = useState(false);
   const [appSettingsFile, setAppSettingsFile] = useState(null);
   const [csvFile, setCsvFile] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -155,6 +157,7 @@ export default function App() {
     try {
       const fd = new FormData();
       fd.append('securityKey', securityKey.trim());
+      if (additionalKeys.trim()) fd.append('additionalKeys', additionalKeys.trim());
       fd.append('csvFile', csvFile);
       const res = await fetch('/api/decrypt', { method: 'POST', body: fd });
       const data = await res.json();
@@ -174,6 +177,7 @@ export default function App() {
     if (!securityKey.trim() || !csvFile) return;
     const fd = new FormData();
     fd.append('securityKey', securityKey.trim());
+    if (additionalKeys.trim()) fd.append('additionalKeys', additionalKeys.trim());
     fd.append('csvFile', csvFile);
     const res = await fetch('/api/decrypt?format=csv', { method: 'POST', body: fd });
     if (!res.ok) { toast.error('Download failed'); return; }
@@ -242,6 +246,38 @@ export default function App() {
                 <p className="text-xs text-green-400 mt-1 flex items-center gap-1">
                   <CheckCircle2 size={11} /> Key set ({securityKey.length} chars)
                 </p>
+              )}
+            </div>
+
+            {/* Additional old keys for key rotation */}
+            <div className="mb-4">
+              <button
+                onClick={() => setShowAdditional(!showAdditional)}
+                className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                <span className={`transition-transform ${showAdditional ? 'rotate-90' : ''}`}>▶</span>
+                Add old SecurityKey (if key was rotated / some rows still failing)
+              </button>
+              {showAdditional && (
+                <div className="mt-2">
+                  <textarea
+                    value={additionalKeys}
+                    onChange={e => setAdditionalKeys(e.target.value)}
+                    placeholder={"Paste old SecurityKey(s) here\nOne per line if multiple"}
+                    rows={3}
+                    className="w-full bg-slate-800 border border-amber-700/50 rounded-lg px-3 py-2
+                               text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-500
+                               font-mono resize-none"
+                  />
+                  <p className="text-xs text-amber-500/70 mt-1">
+                    ⚠ The app will try all keys — older records encrypted with a previous key will now decrypt too.
+                  </p>
+                  {additionalKeys.trim() && (
+                    <p className="text-xs text-amber-400 mt-1 flex items-center gap-1">
+                      <CheckCircle2 size={11} /> {additionalKeys.trim().split('\n').filter(k=>k.trim()).length} additional key(s) added
+                    </p>
+                  )}
+                </div>
               )}
             </div>
 

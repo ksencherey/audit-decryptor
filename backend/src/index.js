@@ -18,33 +18,68 @@ app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
 // ── Crypto helpers ──────────────────────────────────────────────────────────
 
 /**
- * Derive a 32-byte AES key from the SecurityKey string.
- * The C-TWO app uses SHA-256 of the UTF-8 key as the AES key.
+ * Derive the AES key from the SecurityKey string.
+ * Tries approaches in order until one works.
+ * Returns an array of candidate key buffers to try.
  */
+function deriveKeyCandidates(securityKey) {
+  const raw = Buffer.from(securityKey, 'utf8');
+  const candidates = [];
+
+  // 1. Raw UTF-8 bytes, truncated/zero-padded to exactly 32 bytes (most common .NET pattern)
+  const padded = Buffer.alloc(32, 0);
+  raw.copy(padded, 0, 0, Math.min(raw.length, 32));
+  candidates.push(padded);
+
+  // 2. SHA-256 hash of the key (second most common)
+  candidates.push(createHash('sha256').update(securityKey, 'utf8').digest());
+
+  // 3. Raw bytes if key is exactly 16 or 24 bytes (AES-128 / AES-192)
+  if (raw.length === 16 || raw.length === 24 || raw.length === 32) {
+    candidates.push(raw);
+  }
+
+  return candidates;
+}
+
 function deriveKey(securityKey) {
-  return createHash('sha256').update(securityKey, 'utf8').digest();
+  // For backwards compatibility, return the most common approach
+  const raw = Buffer.from(securityKey, 'utf8');
+  const padded = Buffer.alloc(32, 0);
+  raw.copy(padded, 0, 0, Math.min(raw.length, 32));
+  return padded;
 }
 
 /**
- * Decrypt a single field value.
- * Format: <base64-IV>¤<base64-ciphertext>
- * Algorithm: AES-256-CBC, PKCS7 padding.
+ * Decrypt a single field, trying every supplied key (current + rotated old keys).
+ * For each key, tries multiple derivation approaches (raw bytes, SHA-256).
  */
-function decryptField(encryptedValue, keyBuffer) {
-  if (!encryptedValue || !encryptedValue.includes('¤')) {
-    return encryptedValue; // not encrypted, return as-is
+function decryptField(encryptedValue, keys) {
+  if (!encryptedValue || !encryptedValue.includes('¤')) return encryptedValue;
+
+  const keyList = Array.isArray(keys) ? keys : [keys];
+  const [ivB64, cipherB64] = encryptedValue.split('¤');
+  const iv = Buffer.from(ivB64, 'base64');
+  const ciphertext = Buffer.from(cipherB64, 'base64');
+
+  for (const key of keyList) {
+    for (const keyBuffer of deriveKeyCandidates(key)) {
+      try {
+        const decipher = createDecipheriv('aes-256-cbc', keyBuffer, iv);
+        decipher.setAutoPadding(true);
+        const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+        const text = decrypted.toString('utf8');
+        // Validate the result looks like real data (printable UTF-8, not binary garbage)
+        // A simple heuristic: if >20% of chars are control/non-printable, it's garbage
+        const nonPrintable = (text.match(/[\x00-\x08\x0e-\x1f\x7f-\x9f]/g) || []).length;
+        if (nonPrintable / text.length > 0.1) continue; // likely wrong key, try next
+        return text;
+      } catch (_) {
+        // padding error = wrong key, try next
+      }
+    }
   }
-  try {
-    const [ivB64, cipherB64] = encryptedValue.split('¤');
-    const iv = Buffer.from(ivB64, 'base64');
-    const ciphertext = Buffer.from(cipherB64, 'base64');
-    const decipher = createDecipheriv('aes-256-cbc', keyBuffer, iv);
-    decipher.setAutoPadding(true);
-    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    return decrypted.toString('utf8');
-  } catch (err) {
-    return `[DECRYPTION_FAILED: ${err.message}]`;
-  }
+  return `[DECRYPTION_FAILED: tried ${keyList.length} key(s) — add old SecurityKey if key was rotated]`;
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -62,7 +97,7 @@ app.get('/api/health', (_, res) => res.json({ ok: true }));
  */
 app.post('/api/decrypt', upload.single('csvFile'), (req, res) => {
   try {
-    const { securityKey } = req.body;
+    const { securityKey, additionalKeys } = req.body;
     const format = req.query.format || 'json';
 
     if (!securityKey?.trim()) {
@@ -72,11 +107,26 @@ app.post('/api/decrypt', upload.single('csvFile'), (req, res) => {
       return res.status(400).json({ error: 'CSV file is required.' });
     }
 
-    const keyBuffer = deriveKey(securityKey.trim());
-    const csvText = req.file.buffer.toString('utf8');
+    // Build full list of keys to try: current key + any additional (old rotated) keys
+    const allKeys = [securityKey.trim()];
+    if (additionalKeys) {
+      // additionalKeys comes as JSON array string or newline-separated string
+      try {
+        const parsed = JSON.parse(additionalKeys);
+        if (Array.isArray(parsed)) parsed.forEach(k => k.trim() && allKeys.push(k.trim()));
+      } catch {
+        additionalKeys.split('\n').forEach(k => k.trim() && allKeys.push(k.trim()));
+      }
+    }
+    console.log('[decrypt] Using', allKeys.length, 'key(s)');
 
-    // Parse CSV — handle BOM
-    const cleaned = csvText.replace(/^\uFEFF/, '');
+    // SQL Server SSMS can export CSVs as UTF-8, UTF-8 BOM, or Latin-1/Windows-1252.
+    // The ¤ separator (U+00A4) is 0xC2 0xA4 in UTF-8 but only 0xA4 in Latin-1.
+    // Reading as latin1 preserves 0xA4 as U+00A4 correctly in all cases.
+    const csvText = req.file.buffer.toString('latin1');
+
+    // Parse CSV — handle BOM (UTF-8 BOM appears as \xEF\xBB\xBF in latin1)
+    const cleaned = csvText.replace(/^(\uFEFF|\xEF\xBB\xBF)/, '');
     let records;
     try {
       records = parse(cleaned, {
@@ -94,8 +144,16 @@ app.post('/api/decrypt', upload.single('csvFile'), (req, res) => {
     }
 
     const columns = Object.keys(records[0]);
-    const ENCRYPTED_COLS = ['EncryptedOldData', 'EncryptedNewData'];
-    const encryptedCols = ENCRYPTED_COLS.filter(c => columns.includes(c));
+
+    // Match encrypted columns case-insensitively — SQL Server exports may use
+    // different casing (e.g. ENCRYPTEDOLDDATA, encryptedolddata, EncryptedOldData)
+    const ENCRYPTED_COLS = ['encryptedolddata', 'encryptednewdata'];
+    const encryptedCols = columns.filter(c =>
+      ENCRYPTED_COLS.includes(c.toLowerCase())
+    );
+
+    console.log('[decrypt] CSV columns:', columns);
+    console.log('[decrypt] Matched encrypted cols:', encryptedCols);
 
     let decryptedCount = 0;
     let errorCount = 0;
@@ -103,8 +161,13 @@ app.post('/api/decrypt', upload.single('csvFile'), (req, res) => {
     const decryptedRecords = records.map((row, idx) => {
       const newRow = { ...row };
       for (const col of encryptedCols) {
-        if (newRow[col] && newRow[col].includes('¤')) {
-          const result = decryptField(newRow[col], keyBuffer);
+        const val = newRow[col];
+        // The ¤ separator (U+00A4) may survive as-is or as the latin1 byte 0xA4
+        // Check both the unicode character and its latin1 representation
+        const hasSeparator = val && (val.includes('\u00a4') || val.includes('¤'));
+        if (hasSeparator) {
+          const normalised = val.replace(/\u00a4/g, '¤');
+          const result = decryptField(normalised, allKeys);
           if (result.startsWith('[DECRYPTION_FAILED')) {
             errorCount++;
           } else {
